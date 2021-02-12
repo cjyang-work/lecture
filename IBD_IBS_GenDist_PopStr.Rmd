@@ -1,0 +1,647 @@
+---
+title: "IBD, IBS, Genetic Distance, Population Structure"
+output: html_document
+---
+
+We will use `R`, preferably version 4 if possible, for all of our lab practices. If you do not already have `R`, you can download it from [CRAN](https://cran.rediris.es/). Feel free to use either `R` or `RStudio` here, whichever you prefer. Also, if you are having any trouble with running the scripts in `R`, there is an alternative option where you can sign up for a free account at [RStudio Cloud](https://rstudio.cloud/) and run your scripts there. It is not the best free substitute, but it is better than nothing especially if you are having trouble with running `R` scripts locally.  
+
+We will use this document throughout the lab session, but I have also prepared a clean version of the scripts (without all these texts) that you can [download](https://raw.github.com/cjyang-sruc/practice/main/IBD_IBS_GenDist_PopStr.R) and run the scripts directly.  
+
+I hope you all have had some experience in `R` from prior lab sessions. If not, here is just a very brief overview to get you started:  
+
+* any line that starts with `#` are comments and not executed.  
+* you can run each line by clicking once anywhere on the line, then click `Run` or `Ctrl R` (`Ctrl Enter`).  
+* you can also highlight multiple lines and run the scripts similarly.  
+* a function usually appears as `function_name()` where the inputs go into the parantheses.  
+* outputs from a function can be assigned `<-` to an object, for example, `a <- mean(1:10)`.  
+* there are basic functions that come with `R` installation, but there are also a lot of packages that you can install and use their functions. To do so, you need to run `library(package_name)` everytime you start a new `R` session.  
+
+The tips above are probably not enough for beginners in `R`. So, if you have any question during the lab session, please ask me. You can also reach me by email (cyang@sruc.ac.uk) if you prefer.  
+
+&nbsp;  
+
+## IBD practices
+
+We will use the `qtl2` package for calculating IBD probabilities in two populations. The first population is a simulated bi-parental recombinant inbred lines (RILs) population. We will simulate the population using the `AlphaSimR` package ([Gaynor et al 2020](https://doi.org/10.1093/g3journal/jkaa017)). The second population is a multiparental advanced generation intercross (MAGIC) population in sorghum ([Ongom and Ejeta 2018](https://doi.org/10.1534/g3.117.300248)).  
+
+First, we need to install the two required packages. You can skip the installation for any package that you already have.  
+
+```{r}
+#install.packages("qtl2")
+#install.packages("AlphaSimR")
+#install.packages("ggplot2")
+```
+
+Next, we load the packages.  
+
+```{r message=F}
+library(qtl2)
+library(AlphaSimR)
+library(ggplot2)
+```
+
+&nbsp;  
+
+#### IBD calculation in a simulated bi-parental RIL population.
+
+We set a seed number to keep our simulation reproducible.  
+```{r}
+set.seed(99999)
+```
+
+In this hypothetical species, it has only one chromosome with a total genetic length of 1 Morgan. We first create the parent/founder haplotype, `fhap`, by setting haploid genotype of 0 for one founder and 1 for the other founder. We then create 101 markers that are 0.01 Morgan apart, as shown in `pos`.  
+
+```{r}
+fhap <- matrix(c(rep(0,101),rep(1,101)), nrow=2, byrow=T)
+pos <- seq(0,1,0.01)
+names(pos) <- paste("SITE", 1:101, sep="_")
+```
+
+Here, we begin with creating the founder population `F0` using `newMapPop` and `newPop` functions from `AlphaSimR`. Notice that we set `inbred=T` and `ploidy=2L` since we want to use inbred founders and diploid species for simplicity. `SP` is an object required by `AlphaSimR` to keep track of various parameters in each generation.  
+
+```{r}
+founder <- newMapPop(genMap=list(pos),
+                     haplotypes=list(fhap),
+                     inbred=T,
+                     ploidy=2L)
+SP <- SimParam$new(founder)
+F0 <- newPop(founder, simParam=SP)
+```
+
+We cross the two founders using `makeCross` function to create an F1 individual. We self the F1 once and keep 50 F2 individuals. These 50 F2 individuals are further selfed for three additional generations to create our final 50 RILs.  
+
+```{r}
+F1 <- makeCross(pop=F0, crossPlan=matrix(c(1,2),nrow=1), nProgeny=1, simParam=SP)
+RIL <- self(pop=F1, nProgeny=50)
+for(i in 1:3) RIL <- self(pop=RIL, nProgeny=1)
+```
+
+We can extract the marker genotypes for the 50 RILs using `pullSegSiteGeno` function. We also need to convert the marker data from the conventional 0/1/2 format to `qtl2` required 1/2 format.  
+
+| Allele               | AlphaSimR | qtl2 |
+|----------------------|-----------|------|
+| homozygous founder 1 | 0         | 1    |
+| heterozygous         | 1         | 0    |
+| homozygous founder 2 | 2         | 2    |
+
+```{r}
+geno <- pullSegSiteGeno(pop=RIL)
+geno[geno==1] <- 9
+geno[geno==0] <- 1
+geno[geno==9] <- 0
+```
+
+Notice that `qtl2` only accepts marker genotypes coded as 1/2, and so the heterozygous markers coded as 0 is equivalent to missing data. This is because `qtl2` does not accept heterozygous markers in bi-parental RILs. This works out for us, as we will be able to see how these heterozygous markers (missing data) affect the IBD probabilities calculation.  
+
+Next, we need to additional work to prepare the marker data for `qtl2`, which is a little cumbersome in my opinion. Usually, `qtl2` reads the files from a zipped folder, but our marker data is already loaded in R so there is no point in saving and re-loading it. To do so, we just need to mimic the `read_cross2` object that `qtl2` produces after it reads a zipped folder. We first create an empty matrix for `cross_info` - the matrix is empty because it is not required for this specific population, but `qtl2` will not let us get rid of it. Then, we create an object called `xdata`, which is equivalent to the `read_cross2` object.  
+
+* `crosstype="riself"` sets the population as RILs derived from bi-parental crosses.  
+* `geno=list(geno)` takes the marker data for RILs (normally, you might have two or more chromosomes, and so it would be `geno=list(geno_chr1, geno_chr2, geno_chr3)` and so on.  
+* `gmap=list(pos*100)` takes the genetic positions in centiMorgans (1 Morgan = 100 centiMorgans).  
+* `is_x_chr=F` sets the chromosome as autosome.  
+* `is_female=rep(F,50)` allows us to ignore the RILs sexes since it is irrelevant here.  
+* `cross_info=cross_info` takes the empty matrix we just created.  
+* `alleles=c("A","B")` sets the alleles to two, one for founder 1 and another for founder 2.  
+
+Lastly, the final trick we need is to convert the `class` for `xdata` to `cross2`.  
+
+```{r}
+cross_info <- matrix(, nrow=nrow(geno), ncol=0)
+class(cross_info) <- "integer"
+rownames(cross_info) <- rownames(geno)
+
+xdata <- list(crosstype="riself",
+              geno=list(geno),
+              gmap=list(pos*100),
+              is_x_chr=F,
+              is_female=rep(F,50),
+              cross_info=cross_info,
+              alleles=c("A", "B"))
+class(xdata) <- "cross2"
+```
+
+We calculate the IBD probabilities using the `calc_genoprob` function.  
+```{r}
+xdata.gp <- calc_genoprob(xdata)
+```
+
+Before we look at the probability plots, let's look at the marker data for RIL 1 and 2.  
+
+```{r}
+unname(geno[1,])
+```
+Notice that RIL 1 markers are in the order of homozygous founder 2, missing data, homozygous founder 1.  
+
+```{r}
+unname(geno[2,])
+```
+Notice that RIL 2 markers are in the order of homozygous founder 2, homozygous founder 1, missing data, homozygous founder 1.  
+
+Now, how would the probabilities look like for these two RILs?  
+
+```{r}
+id <- 1
+plot(x=pos*100, y=xdata.gp[[1]][id,1,], pch=16, xlab="genetic position (centiMorgan)", ylab="parent 1 probability")
+```
+
+For RIL 1, there is no ambiguity in the IBD probabilities when the markers are homozygous founder 1/2. In the interval where the marker data is missing, the probabilities are no longer 0 or 1, but somewhere in between.  
+
+```{r}
+id <- 2
+plot(x=pos*100, y=xdata.gp[[1]][id,1,], pch=16, xlab="genetic position (centiMorgan)", ylab="parent 1 probability")
+```
+
+For RIL 2, there is no ambiguity in the IBD probabilities at all. That is because the missing data is not sitting at a recombination breakpoint, so `qtl2` simply imputed the IBD probabilities in the missing markers as homozygous founder 1.  
+
+Feel free to change the `id` to any number from 1 to 50 to see other RILs. Anyway, there is not much exciting stuff in this trivial example. Next, we will move on to a multi-parental populations where the founder IBD calculation gets more complicated.  
+
+&nbsp;  
+
+#### IBD calculation in a sorghum MAGIC population.
+
+Here, I have prepared data for the sorghum MAGIC population that was derived from 19 founders and 9 generations of random mating. This population has 194 RILs and 79,728 markers in 10 chromosomes. For simplicity, we will just use 6933 markers from chromosome 1. Unfortunately, there is no genetic map available for this population and so we will rely on the physical map (in Megabases) as a replacement. It is somewhat acceptable since the marker density is fairly high.  
+
+Since the zipped folder is online, we can use the `read_cross2` function to download and read the data directly.  
+
+```{r}
+xdata <- read_cross2("https://raw.github.com/cjyang-sruc/practice/main/data/sorghum_chr1.zip")
+```
+
+Similar to previous example, we calculate the IBD probabilities using `calc_genoprob`. Now, this is going to be slower as there are 19 founders. 
+
+```{r}
+xdata.gp <- calc_genoprob(xdata)
+```
+
+The probability calculation might take about 5-10 minutes. **If it is either too slow or bit too much for your computer, you can reduce the data to 100 markers.** It is not really important here to have all markers as we just want to see how the probabilities come out.  
+
+```{r}
+#xdata$geno[[1]] <- xdata$geno[[1]][, seq(1,6933,70)]
+#xdata$gmap[[1]] <- xdata$gmap[[1]][seq(1,6933,70)]
+#xdata$founder_geno[[1]] <- xdata$founder_geno[[1]][, seq(1,6933,70)]
+#xdata.gp <- calc_genoprob(xdata)
+```
+
+Unlike previously where we only plotted probabilities from one founder, now we want to be able to plot the probabilities for all 19 founders. To do so, we can write a function that allows us to plot the chosen RIL.  
+
+```{r}
+plot.gp <- function(gp, gmap, id, chr=1){
+  
+  n <- dim(gp[[chr]])[2]
+  temp <- sort(rep(1:n, dim(gp[[chr]])[3]))
+  
+  dat <- gp[[chr]][id, ,]
+  dat <- data.frame(probability=c(t(dat)), founder=temp, position=rep(gmap[[chr]], n))
+  dat$founder <- as.factor(dat$founder)
+    
+  ggplot() +
+    geom_line(data=dat, aes(x=position, y=probability, color=founder)) +
+    theme(panel.background=element_blank(), panel.grid=element_blank()) +
+    theme(legend.position="bottom") +
+    annotate("rect", xmin=-Inf, xmax=Inf, ymin=-Inf, ymax=Inf, fill=NA, color="#CCCCCC") +
+    guides(color=guide_legend(nrow=2))
+  
+}
+```
+
+Once we have the function, we can use it for any RIL by changing the `id` argument in `plot.gp`.  In this example, we plot the IBD probabilities for RIL 71.  
+
+```{r}
+plot.gp(gp=xdata.gp, gmap=xdata$gmap, id=71)
+```
+
+Again, feel free to change the `id` to any number from 1 to 194. Notice that there are quite a lot of noises in some individuals - there are not really any clear founder in most positions. While the plot is colorful and looks fun, it is a little hard to identify the founders. So, we will use the `maxmarg` function to do the job for us instead. In this example, we will be calling the founders if they have probabilities above 0.5.  
+
+```{r}
+xdata.fcall <- maxmarg(xdata.gp, minprob=0.5)
+```
+
+To help us visualize the founders better, we can plot them. Again, we create a new function called `plot.fcall` to do so.  
+
+```{r}
+plot.fcall <- function(fcall, id, chr=1){
+  
+  dat <- data.frame(marker=1:ncol(fcall[[chr]]), founder=fcall[[chr]][id,])
+
+  ggplot() +
+    geom_point(data=dat, aes(x=marker, y=founder), size=1, na.rm=T) +
+    theme(panel.background=element_blank(), panel.grid.minor=element_blank()) +
+    theme(panel.grid.major.x=element_blank()) +
+    theme(panel.grid.major.y=element_line(color="#CCCCCC", linetype=2)) +
+    annotate("rect", xmin=-Inf, xmax=Inf, ymin=-Inf, ymax=Inf, fill=NA, color="#CCCCCC") +
+    scale_y_continuous(limits=c(1,19), breaks=c(1:19))
+  
+}
+```
+
+Here, we can see the founders called for all markers in RIL 71. It looks a little suspicious as there are many recombination breakpoints. There could be many reasons, including the use of physical over genetic maps, bad marker orders, imperfect settings used in our calculation, etc...  
+
+```{r}
+plot.fcall(fcall=xdata.fcall, id=71)
+```
+
+&nbsp;  
+
+## IBS practices
+
+For this and subsequent sections, we will use the marker data for 134 soybean lines from <http://koreansoyabase.org> ([Lee et al 2015](https://doi.org/10.1111/tpj.12755)). This dataset includes modern cultivars, landraces and wild germplasm. Soybean has 20 chromosomes, but we will only use the data from the first two chromosomes for simplicity.  
+
+Here, we need the `rrBLUP` package ([Endelman 2011](https://doi.org/10.3835/plantgenome2011.08.0024)) to calculate the genomic relationship matrix (GRM). If you do not already have it installed, you can do so here.  
+
+```{r}
+#install.packages("rrBLUP")
+library(rrBLUP)
+```
+
+The data have also been prepared and can be downloaded and read into R as below. `map` contains the marker information, `info` contains the soybean line information and `geno` contains the marker data.  
+
+```{r}
+map <- read.csv("https://raw.github.com/cjyang-sruc/practice/main/data/soybean_map.csv", as.is=T)
+info <- read.csv("https://raw.github.com/cjyang-sruc/practice/main/data/soybean_info.csv", as.is=T)
+geno <- read.csv("https://raw.github.com/cjyang-sruc/practice/main/data/soybean_geno.csv", as.is=T, row.names=1)
+```
+
+We need to convert the genotype into a matrix format for easier use, as well as transpose it so that the rows represent soybean lines and the columns represent markers.  
+
+```{r}
+geno <- t(as.matrix(geno))
+```
+
+We use the `A.mat` function in `rrBLUP` to calculate the GRM. Notice that the marker data is originally coded as 0/1/2, but `rrBLUP` requires it to be coded as -1/0/1, so we just subtract 1 from the marker data, `geno-1`.  
+
+```{r}
+kin <- A.mat(geno-1)
+```
+
+It is very easy to calculate the GRM using `rrBLUP`, but now let's try it manually. To do so, we need to replicate the formula for GRM in `rrBLUP`. Recall earlier we learned that:  
+
+$$K = \frac{WW'}{\sum 2p_{j}(1-p_{j})}$$
+where $W_{ij} = X_{ij} - 2p_{j}$ and $X_{ij}$ is the marker genotype for individual $i$ at marker $j$.  
+
+```{r}
+p <- (colSums(geno==2) + 0.5*colSums(geno==1))/nrow(geno)
+W <- geno - matrix(rep(2*p, nrow(geno)), nrow=nrow(geno), byrow=T)
+d <- sum(2*p*(1-p))
+kin2 <- W%*%t(W)/d
+```
+
+To check if `kin` and `kin2` are the same, we can either plot or calculate their correlations.  
+
+```{r}
+plot(x=kin[lower.tri(kin)],
+     y=kin2[lower.tri(kin2)],
+     pch=16,
+     cex=0.5,
+     col="#555555",
+     xlab="kin",
+     ylab="kin2",
+     xlim=range(kin),
+     ylim=range(kin2))
+
+points(x=diag(kin),
+       y=diag(kin2),
+       pch=16,
+       cex=0.5,
+       col="#55FF55")
+
+abline(a=0, b=1, col="#FF5555")
+
+cor(kin[lower.tri(kin)], kin2[lower.tri(kin2)])
+
+cor(diag(kin), diag(kin2))
+```
+
+*If there are packages that do this for us, why do we need to worry about calculating the GRM manually?* We can probably rely on packages most of the time, with just a few exceptions. Remember earlier we discussed that there are many ways to calculate GRM, each of them are some variation of another. We might run into a situation where the specific method for GRM that we really want is not implemented in `R` but some other softwares. It is not always straightforward to convert the GRM into a format that you can feed into `R`, for example, some softwares output GRM in a binary format without saying if it is saved in a matrix or table style. So, with just a few lines of `R` scripts, we can save some time and effort!  
+
+There are some fun tricks we can do with GRM calculation. Normally, we calculate GRM for the whole genome (well, in our practice here, it is just for two chromosomes). We can also separate out the marker data by chromosome and calculate GRM for each chromosome.  
+
+```{r}
+geno.1 <- geno[, map$chr==1]
+p.1 <- (colSums(geno.1==2) + 0.5*colSums(geno.1==1))/nrow(geno.1)
+W.1 <- geno.1 - matrix(rep(2*p.1, nrow(geno.1)), nrow=nrow(geno.1), byrow=T)
+d.1 <- sum(2*p.1*(1-p.1))
+kin3.1 <- W.1%*%t(W.1)/d.1
+
+geno.2 <- geno[, map$chr==2]
+p.2 <- (colSums(geno.2==2) + 0.5*colSums(geno.2==1))/nrow(geno.2)
+W.2 <- geno.2 - matrix(rep(2*p.2, nrow(geno.2)), nrow=nrow(geno.2), byrow=T)
+d.2 <- sum(2*p.2*(1-p.2))
+kin3.2 <- W.2%*%t(W.2)/d.2
+```
+
+Notice that if we combine `kin3.1` and `kin3.2` together as weighted means, we essentially reconstruct the same matrix as calculated previously.  
+
+```{r}
+kin3 <- kin3.1*d.1/d + kin3.2*d.2/d
+cor(kin[lower.tri(kin)], kin2[lower.tri(kin3)])
+cor(diag(kin), diag(kin3))
+```
+
+There are several reasons why we might want to calculate GRM for specific set of markers. We might want to do "leave one chromosome out" (LOCO) GWAS ([Lippert et al 2011](https://doi.org/10.1038/nmeth.1681)), which is a practice where you avoid fitting GRM from the chromosome being tested into the model. We might be interested in calculating genomic variances/covariances in specific regions using the genome partitioning method ([Schork 2001](https://doi.org/10.1016/s0065-2660(01)42030-x)). We might also want to speed up GRM calculation for large dataset like how it is done in [LDAK](http://dougspeed.com/ldak/). Or, we might also want to apply different weights to different subsets of markers; for example, we could adjust for linkage disequilibrium (LD) among markers by reducing the weights of markers that are in high LD ([Speed et al 2012](https://doi.org/10.1016/j.ajhg.2012.10.010)).
+
+For example, we want to emphasize more contributions into GRM from chromosome 1 (`z.1`) than chromosome 2 (`z.2`), so we set `z.1` to be 10 times `z.2`. Notice when we combine the two GRMs, the weights are no longer as simple as `d.1/d` and `d.2/d`.   
+
+```{r}
+z.1 <- 10
+z.2 <- 1
+kin4 <- kin3.1*d.1*z.1/(z.1*d.1+z.2*d.2) + kin3.2*d.2*z.2/(z.1*d.1+z.2*d.2)
+```
+
+Since `kin4` has more contributions from chromosome 1 than chromosome 2, how would `kin4` look like?  
+
+```{r}
+plot(x=kin[lower.tri(kin)],
+     y=kin4[lower.tri(kin4)],
+     pch=16,
+     cex=0.5,
+     col="#555555",
+     xlab="kin",
+     ylab="kin4",
+     xlim=range(kin),
+     ylim=range(kin4))
+
+points(x=diag(kin),
+       y=diag(kin4),
+       pch=16,
+       cex=0.5,
+       col="#55FF55")
+
+abline(a=0, b=1, col="#FF5555")
+
+cor(kin[lower.tri(kin)], kin4[lower.tri(kin4)])
+
+cor(diag(kin), diag(kin4))
+```
+
+Unlike `kin2` or `kin3`, `kin4` is not the same as `kin`. If we compare `kin4` to `kin3.1` and `kin3.2`, we should see that `kin4` is more similar to `kin3.1`, which is not surprising.  
+
+```{r}
+cor(kin3.1[lower.tri(kin3.1)], kin4[lower.tri(kin4)])
+cor(diag(kin3.1), diag(kin4))
+
+cor(kin3.2[lower.tri(kin3.2)], kin4[lower.tri(kin4)])
+cor(diag(kin3.2), diag(kin4))
+```
+
+&nbsp;  
+
+## Genetic distance practices
+
+To calculate Fst, we will use the `hierfstat` package ([Goudet 2004](https://doi.org/10.1111/j.1471-8286.2004.00828.x)).  
+
+```{r}
+#install.packages("hierfstat")
+library(hierfstat)
+```
+
+We can use the same soybean dataset for our practice here.  
+
+```{r}
+library(rrBLUP)
+map <- read.csv("https://raw.github.com/cjyang-sruc/practice/main/data/soybean_map.csv", as.is=T)
+info <- read.csv("https://raw.github.com/cjyang-sruc/practice/main/data/soybean_info.csv", as.is=T)
+geno <- read.csv("https://raw.github.com/cjyang-sruc/practice/main/data/soybean_geno.csv", as.is=T, row.names=1)
+geno <- t(as.matrix(geno))
+kin <- A.mat(geno-1)
+```
+
+The function `fs.dosage` in `hierfstat` allows us to calculate the mean inbreeding coefficients (Fis) and the mean Fst for each population and also across all populations.  
+
+```{r}
+fs.dosage(dos=geno, pop=info$type)
+```
+
+The Fis from all sub populations is similar to the `diag(kin) - 1`, since the GRM diagonals are $1 + f$.  
+
+```{r}
+mean(diag(kin) - 1)
+```
+
+Again, we can calculate the Fst manually too, although there is less incentive to do so here compared to the GRM. To do so, let's start by splitting the marker data by sub populations: Cultivar (C), Landrace (L) and Wild (W).  
+
+```{r}
+geno.C <- geno[info$type=="Cultivar", ]
+geno.L <- geno[info$type=="Landrace", ]
+geno.W <- geno[info$type=="Wild", ]
+```
+
+The formula for Fst that we are using here is:  
+
+$$F_{ST, i} = \frac{\pi_{between} - \pi_{within, i}}{\pi_{between}}$$
+
+where $\pi_{between}$ is the mean marker difference between all possible pairs of sub populations and $\pi_{within, i}$ is the mean marker difference within sub population $i$.  
+
+We will use `for` loop to calculate the marker differences - this is not the most efficient way but it is hopefully a less confusing way to show the individuals that we are comparing.  
+
+Below is $\pi_{within, Cultivar}$.  
+
+```{r}
+piw.C <- vector()
+for(i in 1:(nrow(geno.C)-1)){
+  for(j in (i+1):nrow(geno.C)){
+    piw.C <- c(piw.C, sum(abs(geno.C[i,] - geno.C[j,])))
+  }
+}
+piw.C <- mean(piw.C)
+```
+
+Below is $\pi_{within, Landrace}$.  
+
+```{r}
+piw.L <- vector()
+for(i in 1:(nrow(geno.L)-1)){
+  for(j in (i+1):nrow(geno.L)){
+    piw.L <- c(piw.L, sum(abs(geno.L[i,] - geno.L[j,])))
+  }
+}
+piw.L <- mean(piw.L)
+```
+
+Below is $\pi_{within, Wild}$.  
+
+```{r}
+piw.W <- vector()
+for(i in 1:(nrow(geno.W)-1)){
+  for(j in (i+1):nrow(geno.W)){
+    piw.W <- c(piw.W, sum(abs(geno.W[i,] - geno.W[j,])))
+  }
+}
+piw.W <- mean(piw.W)
+```
+
+Below is $\pi_{between, Cultivar-Landrace}$.  
+
+```{r}
+pib.CL <- vector()
+for(i in 1:nrow(geno.C)){
+  for(j in 1:nrow(geno.L)){
+    pib.CL <- c(pib.CL, sum(abs(geno.C[i,] - geno.L[j,])))
+  }
+}
+pib.CL <- mean(pib.CL)
+```
+
+Below is $\pi_{between, Cultivar-Wild}$.  
+
+```{r}
+pib.CW <- vector()
+for(i in 1:nrow(geno.C)){
+  for(j in 1:nrow(geno.W)){
+    pib.CW <- c(pib.CW, sum(abs(geno.C[i,] - geno.W[j,])))
+  }
+}
+pib.CW <- mean(pib.CW)
+```
+
+Below is $\pi_{between, Landrace-Wild}$.  
+
+```{r}
+pib.LW <- vector()
+for(i in 1:nrow(geno.L)){
+  for(j in 1:nrow(geno.W)){
+    pib.LW <- c(pib.LW, sum(abs(geno.L[i,] - geno.W[j,])))
+  }
+}
+pib.LW <- mean(pib.LW)
+```
+
+Below is $\pi_{between}$.  
+
+```{r}
+pib <- mean(c(pib.CL, pib.CW, pib.LW))
+```
+
+Now that we have all the $\pi$'s, we can calculate the Fst for each sub population and overall population.  
+
+```{r}
+(pib - piw.C)/pib
+(pib - piw.L)/pib
+(pib - piw.W)/pib
+(3*pib - piw.C - piw.L - piw.W)/(3*pib)
+```
+
+The values that we calculated here should be similar enough to the ones we got from `hierfstat`. Anyway, calculating Fst from this soybean dataset may not be too meaningful, since there is very little representation from the landraces.  
+
+&nbsp;  
+
+## Population structure practices
+
+#### Principal component analysis (PCA)
+
+We can use the same soybean dataset again for demonstrating population structure. We start off with a principal component analysis (PCA) using a basic `R` function, `eigen`, which essentially performs an eigen-decomposition of `kin` matrix.  
+
+```{r}
+pca <- eigen(kin)
+```
+
+An important element to consider in PCA is the percent variance explained (PVE) by each PC. Higher PVE means that the PC is more correlated to the underlying factor (population structure).  
+
+```{r}
+round(pca$values/sum(pca$values)*100, 2)
+```
+
+Next, we can try and see if PC1 and PC2 are sufficient to draw out the differences among the sub populations.  
+
+```{r}
+library(ggplot2)
+dat <- data.frame(PC1=pca$vectors[,1], PC2=pca$vectors[,2], type=info$type, origin=info$origin)
+ggplot() +
+  geom_point(data=dat, aes(x=PC1, y=PC2, color=type)) +
+  theme(panel.background=element_blank(), panel.grid=element_blank()) +
+  annotate("rect", xmin=-Inf, xmax=Inf, ymin=-Inf, ymax=Inf, fill=NA, color="#CCCCCC")
+```
+
+It appears that the Wild sub population is well separated by PC1, but the differences between Cultivar and Landrace sub populations are not very well resolved.  
+
+In the `info` object, there is another column called `origin`. Most of the lines are of Korean origin, so it might better to recode the `origin` to either `Korea` or `Elsewhere`. Now, let's see if the origins can be resolved in the 2-D PCA plot.  
+
+```{r}
+library(ggplot2)
+dat <- data.frame(PC1=pca$vectors[,1], PC2=pca$vectors[,2], type=info$type, origin=info$origin)
+dat$origin2 <- ifelse(dat$origin=="Korea", "Korea", "Elsewhere")
+ggplot() +
+  geom_point(data=dat, aes(x=PC1, y=PC2, color=type, pch=origin2)) +
+  theme(panel.background=element_blank(), panel.grid=element_blank()) +
+  annotate("rect", xmin=-Inf, xmax=Inf, ymin=-Inf, ymax=Inf, fill=NA, color="#CCCCCC")
+```
+
+Unfortunately, it seems that the line origins did not matter as much as the line types.  
+
+&nbsp;  
+
+#### Population admixture analysis
+
+For this last section, we will use a package called `LEA` ([Frichot and Francois 2015](https://doi.org/10.1111/2041-210X.12382)) to do some population admixture analysis. In the lecture, we talked about the popular softwares like STRUCTURE ([Pritchard et al 2000](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1461096/)) and ADMIXTURE ([Alexander et al 2009](https://dx.doi.org/10.1101%2Fgr.094052.109)), but none of those are implemented in R. Since it is easier for us to go through the whole practice in the same platform, `LEA` seems like a good alternative as it claims to use the same method as STRUCTURE. I personally have no experience in running STRUCTURE or similar programs, so please bear with me in this section!  
+
+Unlike the other packages, `LEA` is provided via Bioconductor instead of CRAN like many common R packages. We need to first install the Bioconductor package that will allow us to download packages from its site.  
+
+```{r message=F}
+#install.packages("BiocManager")
+#library(BiocManager)
+#install("LEA")
+library(LEA)
+```
+
+We need to prepare the marker data in a format that `LEA` accepts. We start by reordering the marker data by line type so that the lines are arranged in Cultivar-Landrace-Wild order. We also need to combine the marker alleles from all lines into a single string for each marker. Then, we need to export the marker data out of `R` because `LEA` would not accept an input that is already loaded in `R`. It is quite an awkward way to work in R, and you can probably tell that I am not a fan of this package.  
+
+```{r}
+LEA.info <- info[order(info$type), ]
+LEA.geno <- geno[LEA.info$line,]
+LEA.geno <- data.frame(t(LEA.geno))
+LEA.geno <- do.call(paste, c(LEA.geno, sep=""))
+write.table(LEA.geno, "LEA.geno", quote=F, row.names=F, col.names=F, sep="\t")
+```
+
+Once we have the file ready, we use the `snmf` function in `LEA` to perform the admixture analysis. One important value to consider here is K, which is the theoretical number of founders that gave rise to all individuals in the population that we are analyzing. I do not know what is a good K value, and there are many literatures out there that may help you in deciding the "correct" K. Anyway, for now, let's start with testing out 3, 4 and 5.  
+
+```{r results="hide"}
+out <- snmf("LEA.geno", K=3:5, entropy=T, repetitions=10, project="new")
+```
+
+For each K, we ran the model 10 times as indicated by `repetitions=10`. We plot only the best iteration, which is the one with lowest entropy. We also add vertical lines to the plot to separate out the line types, starting with Cultivar in the left, Landrace in the middle and Wild in the right.  
+
+Below is for `K=3`.  
+
+```{r message=F}
+barchart(out,
+         K=3,
+         run=which.min(cross.entropy(out, K=3)),
+         sort.by.Q=F,
+         border=NA,
+         space=0,
+         col=c("#E69F00", "#56B4E9", "#009E73"),
+         ylab="Ancestry proportions")
+abline(v=c(47, 55), col="#000000", lwd=2)
+```
+
+Below is for `K=4`.  
+
+```{r message=F}
+outp <- barchart(out,
+                 K=4,
+                 run=which.min(cross.entropy(out, K=4)),
+                 sort.by.Q=F,
+                 border=NA,
+                 space=0,
+                 col=c("#E69F00", "#56B4E9", "#009E73", "#F0E442"),
+                 ylab="Ancestry proportions")
+abline(v=c(47, 55), col="#000000", lwd=2)
+```
+
+Below is for `K=5`.  
+
+```{r message=F}
+outp <- barchart(out,
+                 K=5,
+                 run=which.min(cross.entropy(out, K=5)),
+                 sort.by.Q=F,
+                 border=NA,
+                 space=0,
+                 col=c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2"),
+                 ylab="Ancestry proportions")
+abline(v=c(47, 55), col="#000000", lwd=2)
+```
+
+From my minimal experience, `K=3` looks to be the best as it separates out the three sub populations better than the others.  
+
+That is the end of our lab session. I hope there is something useful for you all to take home. Please feel free to email me (cyang@sruc.ac.uk) if you have any question.  
