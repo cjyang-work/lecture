@@ -1,0 +1,1 @@
+Here is a folder containing all the files for the course on "genetic relationship: IBD, IBS, genetic distance, population structure". This course is part of the [24th International Master in Plant Genetics, Genomics and Breeding](http://www.masterplantbreeding.com/).  
